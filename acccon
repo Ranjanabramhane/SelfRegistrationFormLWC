@@ -1,0 +1,585 @@
+-----------------------------------@SelfRegistrationFormDuplication@-------------------------------------------------------------------------------------
+public without sharing class SelfRegistrationFormDuplication {
+//public boolean errorCheck = false;
+   //getting recordtype ids
+    @TestVisible
+    private static final Id ACC_REC_TYPE_ID = Schema.SObjectType.Account.getRecordTypeInfosByDeveloperName().get('Training_Provider').getRecordTypeId();
+    private static final Id CON_REC_TYPE_ID = Schema.SObjectType.Contact.getRecordTypeInfosByDeveloperName().get('Training_Provider').getRecordTypeId();
+
+    
+    //getting field metadata and record Ids
+    @AuraEnabled(cacheable=true)
+    public static RecordTypeIdsWrapper getRecordTypeIds() {
+            List<Self_Registration_Form_Fields__mdt> l1 = [
+                SELECT Field_Label__c, Field_Name__c, Order__c, Is_Active__c, Object_Name__c,Required__c,isAddress__c
+                FROM Self_Registration_Form_Fields__mdt
+                WHERE Is_Active__c = true
+                ORDER BY Order__c
+            ];
+            return new RecordTypeIdsWrapper(ACC_REC_TYPE_ID, CON_REC_TYPE_ID, l1);
+        }
+
+    // Using wrapper class
+    public class RecordTypeIdsWrapper {
+
+        @AuraEnabled
+        public Id accountRecordTypeId;
+        @AuraEnabled
+        public Id contactRecordTypeId;
+        @AuraEnabled
+        public List<Self_Registration_Form_Fields__mdt> listRegistrationFields;
+        
+
+        public RecordTypeIdsWrapper(Id accountRecordTypeId, Id contactRecordTypeId,List<Self_Registration_Form_Fields__mdt> listRegistrationFields) {
+            this.accountRecordTypeId = accountRecordTypeId;
+            this.contactRecordTypeId = contactRecordTypeId;
+            this.listRegistrationFields = listRegistrationFields;
+        }
+    }
+      // Method to check for duplicate Account records
+    private static Account getDuplicateAccount(Account accountData) {
+        List<Account> existingAccounts = [
+            SELECT Id
+            FROM Account
+            WHERE Acc_Email__c = :accountData.Acc_Email__c
+            LIMIT 1
+        ];
+
+        if (!existingAccounts.isEmpty()) {
+            return existingAccounts[0];
+        } else {
+            return null;
+        }
+    }
+//Method to check Duplicate Contact Based on Email
+    private static Contact getDuplicateContactInOtherAccount(String email, Id accountId) {
+    List<Contact> existingContacts = [
+        SELECT Id, AccountId
+        FROM Contact
+        WHERE Email = :email
+        AND AccountId != :accountId
+        AND RecordTypeId =:CON_REC_TYPE_ID
+        LIMIT 1
+    ];
+	system.debug('existingContacts'+existingContacts);
+    if (!existingContacts.isEmpty()) {
+        return existingContacts[0];
+    } else {
+        return null;
+    }
+}
+
+    //creating account and contact
+    @AuraEnabled
+    public static string createAccountAndContact(Account accountData, Contact contactData) {
+        system.debug('contact data ='+contactdata);
+        boolean errorCheck = false;
+        string errormsg='Duplicate contact found in a different account.';
+        try {
+            // Check for duplicate account
+            Account existingAccount = getDuplicateAccount(accountData);
+
+            if (existingAccount != null) {
+                // If duplicate account is found, associate its ID with contactData
+                contactData.AccountId = existingAccount.Id;
+            } else {
+                // If no duplicate account is found, create a new account
+                accountData.RecordTypeId = Schema.SObjectType.Account.getRecordTypeInfosByDeveloperName().get('Training_Provider').getRecordTypeId();
+                accountData.OwnerId = userinfo.getUserId();
+
+                try {
+                    insert accountData; 
+                } catch (Exception ex) {
+                    System.debug('An error occurred while creating records: ' + ex.getMessage());
+                }
+
+                // Associate the new account's ID with contactData
+                contactData.AccountId = accountData.Id;
+            }
+			system.debug('contactdata.email' +contactData.Email);
+            system.debug('contactdata.accountId' +contactData.accountId);
+            
+             // Check for duplicate contact within the same account
+            Contact existingContact = getDuplicateContactInOtherAccount(contactData.Email,contactData.accountId);
+            system.debug(existingContact);
+            if (existingContact != null) {
+                //throw new AuraHandledException('Duplicate contact found with different existing account Id');
+                Account existingContactAccount = [SELECT Acc_Email__c FROM Account WHERE Id = :existingContact.AccountId LIMIT 1];
+         system.debug(existingContactAccount);
+                if (existingContactAccount != null && existingContactAccount.Acc_Email__c != null &&
+                    existingContactAccount.Acc_Email__c != accountData.Acc_Email__c) {
+                    // If the emails don't match, throw an exception
+                    system.debug('Should enter in this block');
+                    errorCheck = true;
+                    system.debug('errorCheck::'+errorCheck);
+                    system.debug('errormsg'+errormsg);
+                    return errormsg;
+                   // throw new AuraHandledException('Duplicate contact found in a different account.');
+                                 
+                    //system.debug('after exception');
+                }
+            }
+                 // Set other contactData fields
+            contactData.RecordTypeId = Schema.SObjectType.Contact.getRecordTypeInfosByDeveloperName().get('Training_Provider').getRecordTypeId();
+            contactData.Is_Self_Registered__c = true;
+            contactData.TP_Acknowledge__c = true;
+            System.debug('RecordTypeId: ' + contactData.RecordTypeId);
+            system.debug('after exception after contact');
+
+            // Insert the contactData record
+           
+            system.debug('before insert');
+            insert contactData;
+            system.debug('after insert');
+
+        } 
+        catch (Exception ex) {
+            // Log the exception for troubleshooting
+            if(errorCheck == true){
+                System.debug('Duplicate contact found in a different account.' + ex.getMessage());
+            }else{
+                System.debug('An error occurred while creating records: ' + ex.getMessage());
+            }
+            // Raise a custom exception with an informative message
+            throw new AuraHandledException(ex.getMessage());
+            //system.debug('AuraHandledException(ex.getMessage()):'+AuraHandledException(ex.getMessage()));
+        }
+        return null;
+    }
+
+}
+
+-----------------------------------------HTML-----------------------------------------------------------------
+<template>
+     <template if:true={dataInserted}>
+              <lightning-card title="Registration Form" > 
+                 <div class="slds-text-color_success slds-text-align_center ">{successMsg}</div> 
+              </lightning-card>
+         </template>
+     <template if:false={dataInserted}>
+        <lightning-card title="Registration Form" > 
+            <!-- Company Information Section -->
+            <div class="section">
+                <h2 class="section-title">Company Information</h2>
+                <lightning-record-edit-form object-api-name="Account" onsubmit={handleCompanySave} record-type-id={accountRecordTypeId}>
+                    <lightning-messages></lightning-messages>
+                    <template for:each={accountFields} for:item="eachAccFieldName">
+                        <template if:true={eachAccFieldName.isAddress}>
+                           <lightning-input-address  address-label={eachAccFieldName.label}
+                                street-label="Street"
+                                city-label="City"
+                                country-label="Country"
+                                province-label="Province"
+                                postal-code-label="PostalCode"
+                                street="Default Street Line"
+                                city=""
+                                country=""
+                                province=""
+                                postal-code=""
+                                required={eachAccFieldName.isRequired}
+                                key={eachAccFieldName.fieldName}
+                                onchange={onAccountAddrChange}
+                                 show-address-lookup>
+                            </lightning-input-address>
+                       </template>
+                       <template if:false={eachAccFieldName.isAddress}>
+                            <lightning-input-field key={eachAccFieldName.fieldName} field-name={eachAccFieldName.fieldName} onchange={genericOnAccountChange} data-id="overview"
+                                required={eachAccFieldName.isRequired}></lightning-input-field>
+                       </template>
+                       <!--<lightning-input-field key={eachAccFieldName.fieldName} field-name={eachAccFieldName.fieldName} onchange={genericOnAccountChange} data-id="overview"
+                        required={eachAccFieldName.isRequired}></lightning-input-field>-->
+                    </template>
+                </lightning-record-edit-form>
+            </div>
+            
+            <!-- Contact Information Section -->
+            <div class="section">
+                <h2 class="section-title">Contact Information</h2>
+                <lightning-record-edit-form object-api-name="Contact" onsubmit={handleContactSave}>
+                    <lightning-messages></lightning-messages>
+                    <template for:each={contactFields} for:item="eachConFieldName">
+                        <lightning-input-field key={eachConFieldName.fieldName} field-name={eachConFieldName.fieldName} onchange={genericOnContactChange} data-id="overview1"
+                         required={eachConFieldName.isRequired}></lightning-input-field>
+                    </template>
+                </lightning-record-edit-form>
+            </div>
+            
+            <div>
+                <lightning-button class="custom-button" label="Terms and conditions" variant="base" onclick={opentc}></lightning-button>                   
+            </div>
+
+            <!-- Buttons Section -->
+            <div class="buttons-section">
+                <lightning-button variant="brand" name="Save" label="Submit" onclick={handleSave} class="slds-m-right_xxx-small" disabled={saveBtnDisabled}></lightning-button>
+                <lightning-button variant="neutral" label="Cancel" title="Cancel" onclick={handleCancel} class="slds-m-left_xxx-small"></lightning-button>
+            </div>  
+            
+            <template if:true={loadSpinner}>
+                <div>
+                    <lightning-spinner alternative-text="Loading" size="large"></lightning-spinner>
+                </div>
+            </template>
+    </lightning-card>
+     </template>
+       <!-- Terms and conditions open popup-->
+     <template if:true={isOpen}>
+        <section role="dialog" tabindex="-1" aria-labelledby="modal-heading-01" aria-modal="true" aria-describedby="modal-content-id-1" class="slds-modal slds-fade-in-open slds-modal_medium">
+            <div class="slds-modal__container">
+                <header class="slds-modal__header">
+                    <h2 id="modal-heading-01" class="slds-text-heading_medium slds-hyphenate">Terms</h2>
+                    <button class="slds-button slds-modal__close slds-button_icon slds-button_icon-inverse" title="Close" onclick={closetc}>
+                        <svg class="slds-button__icon slds-button__icon_large" aria-hidden="true">
+                            <use xlink:href="/_slds/icons/utility-sprite/svg/symbols.svg#close"></use>
+                        </svg>
+                        <span class="slds-assistive-text">Close</span>
+                    </button>                
+                </header>
+                <div class="slds-modal__content slds-p-around_medium slds-text-heading_small" id="modal-content-id-1">
+                    <ol>
+                        <li>{label.ETP_Header1}</li>
+                        <li>{label.ETP_Header2}</li>
+                        <li>{label.ETP_Header3}</li>
+                        <li>{label.ETP_Header4}</li>
+                        <li>{label.ETP_Header5}</li>
+                    </ol>
+                    <br/>
+                    <span class="slds-grid slds-align_absolute-left">
+                        <lightning-input 
+                            type="toggle"  
+                            name="input1" 
+                            label="Agree" 
+                            variant="label-hidden" 
+                            message-toggle-active="" 
+                            message-toggle-inactive=""
+                            onchange={handleToggleChange}
+                            checked={toggleValue}>
+                        </lightning-input>
+                        <span class="slds-p-left_small">I agree to the terms and conditions</span>
+                    </span>
+                 </div>
+                   
+                <footer class="slds-modal__footer">
+                     <lightning-button variant="brand" label="Agree" title="Agree" onclick={handleAgree} disabled={agreeBtnDisabled}></lightning-button>
+                </footer>
+            </div>
+        </section>
+        <div class="slds-backdrop slds-backdrop_open"></div>
+    </template>
+</template>
+----------------------------------------------------JS-----------------------------------------------------------
+import { LightningElement, wire, track } from 'lwc';
+
+import { ShowToastEvent } from "lightning/platformShowToastEvent";
+import createAccountAndContact from '@salesforce/apex/SelfRegistrationFormDuplication.createAccountAndContact';
+import getRecordTypeIds from '@salesforce/apex/SelfRegistrationFormController.getRecordTypeIds';
+import ToastContainer from 'lightning/toastContainer';
+import ETP_Header1 from '@salesforce/label/c.ETP_Header1';
+import ETP_Header2 from '@salesforce/label/c.ETP_Header2';
+import ETP_Header3 from '@salesforce/label/c.ETP_Header3';
+import ETP_Header4 from '@salesforce/label/c.ETP_Header4';
+import ETP_Header5 from '@salesforce/label/c.ETP_Header5';
+/*import ETP_Header6 from '@salesforce/label/c.ETP_Header6';
+import ETP_Header7 from '@salesforce/label/c.ETP_Header7';
+import ETP_Header8 from '@salesforce/label/c.ETP_Header8';
+import ETP_Header9 from '@salesforce/label/c.ETP_Header9';
+import ETP_Header10 from '@salesforce/label/c.ETP_Header10';
+import ETP_Header11 from '@salesforce/label/c.ETP_Header11';*/
+
+
+export default class SelfRegistartionForm extends LightningElement {
+
+     @track accountFields = [];
+    @track contactFields = [];
+    @track accountData = new Map();
+    @track contactData = new Map();
+    @track accountRecordTypeId;
+    @track contactRecordTypeId;
+    loadSpinner;
+    dataInserted;
+    @track successMsg='';
+    @track isOpen = false;
+    label = {
+        ETP_Header1,
+        ETP_Header2,
+        ETP_Header3,
+        ETP_Header4,
+        ETP_Header5
+    };
+  @track toggleValue =false;
+  @track agreeBtn = false;
+  @track variableFromApex;//added
+connectedCallback() {
+        const toastContainer = ToastContainer.instance();
+        toastContainer.maxShown = 5;
+        this.successMsg ='';
+    }
+
+    @wire(getRecordTypeIds)
+    wiredFields({ error, data }) {
+        if (data) {
+            data.listRegistrationFields.forEach(eachData => {
+                if (eachData.Object_Name__c === 'Account') {
+                   // this.accountFields.push(eachData.Field_Name__c);
+                   this.accountFields.push({fieldName : eachData.Field_Name__c, isRequired : eachData.Required__c,label : eachData.Field_Name__c, isAddress : eachData.isAddress__c});
+                }
+                else if (eachData.Object_Name__c === 'Contact') {
+                   // this.contactFields.push(eachData.Field_Name__c);
+                   // this.contactFields.push(eachData.Field_Name__c);
+                   this.contactFields.push({fieldName : eachData.Field_Name__c, isRequired : eachData.Required__c,label : eachData.Field_Name__c, isAddress : eachData.isAddress__c});
+                }
+            });
+            this.accountRecordTypeId = data.accountRecordTypeId;
+            this.contactRecordTypeId = data.contactRecordTypeId;
+            //this.variableFromApex = data.variableFromApex;//added
+            console.log('this.variableFromApex'+this.variableFromApex);
+            console.log('this.accountFields', this.accountFields);
+            console.log('this.contactFields', this.contactFields);
+            console.log('this.accountRecordTypeId', this.accountRecordTypeId);
+            console.log('this.contactRecordTypeId', this.contactRecordTypeId);
+        } else if (error) {
+            console.error(error);
+        }
+    }
+
+    genericOnContactChange(event) {
+        let changedValue = event.target.value === '' ? undefined : event.target.value;
+        // this.contactData.set(event.target.fieldName, changedValue);
+        if(changedValue) {
+            this.contactData.set(event.target.fieldName, changedValue);
+        }
+        else {
+            this.contactData.delete(event.target.fieldName);
+        }
+    }
+
+    genericOnAccountChange(event) {
+        let changedValue = event.target.value === '' ? undefined : event.target.value;
+        if(changedValue) {
+            this.accountData.set(event.target.fieldName, changedValue);
+        }
+        else {
+            this.accountData.delete(event.target.fieldName);
+        }
+    }
+     onAccountAddrChange(event) {
+        console.log('address ',event.target.value,event,event.target,event.target.city,event.target.street);
+        //let obj = {'City':event.target.city,'Street':event.target.street,'PostalCode':event.target.postalCode,'PostalCode':event.target.postalCode,};
+       //let state = {'State':event.target.province}
+      // console.state('Value Of State'+obj);
+        this.accountData.set('BillingCity', event.target.city);
+        this.accountData.set('BillingStreet', event.target.street);
+        this.accountData.set('BillingPostalCode', event.target.postalCode);
+        //this.accountData.set('BillingState', state);
+        this.accountData.set('BillingState', event.target.province);
+        this.accountData.set('BillingCountry', event.target.country);
+
+        console.log('BA ',this.accountData);
+    }
+    handleSave() {
+        
+        // Implement logic to create Account and Contact records using this.fieldValues
+        debugger
+        console.log('this.accountData', this.accountData);
+        console.log('this.contactData', this.contactData);
+
+        this.loadSpinner = true;
+        let objAccount = { Id: null };
+        for (let [key, value] of this.accountData.entries()) {
+            objAccount[key] = value;
+        }
+        let objContact = { Id: null };
+        for (let [key, value] of this.contactData.entries()) {
+            objContact[key] = value;
+        }
+         let mandatoryFieldsNotSelected = false;
+         
+
+        // Check if mandatory fields for Account are not selected
+        this.accountFields.forEach(field => {
+            if (field.isRequired && !this.accountData.has(field.fieldName)) {
+                mandatoryFieldsNotSelected = true;
+                // Throw an error or handle it as needed
+                console.log('mandatoryFieldsNotSelected123'+mandatoryFieldsNotSelected);
+                this.showToastMessage('Error', 'Please Fill all mandatory fields for Account. '+field.fieldName, 'error');
+                //location.reload();
+                //return;
+            }
+        });
+
+    // Check if mandatory fields for Contact are not selected
+    this.contactFields.forEach(field => {
+        if (field.isRequired && !this.contactData.has(field.fieldName)) {
+            mandatoryFieldsNotSelected = true;
+            console.log('mandatoryFieldsNotSelected456'+mandatoryFieldsNotSelected);
+            // Throw an error or handle it as needed
+            this.showToastMessage('Error', 'Please Fill all mandatory fields for Contact. '+field.fieldName, 'error');
+            //location.reload();
+            
+        }
+    });
+    //return;
+
+    // If any mandatory field is not selected, prevent record creation
+    if (mandatoryFieldsNotSelected) {
+        this.loadSpinner = false;
+        return;
+    }
+
+        console.log('objContact', objContact);
+        console.log('objAccount', objAccount);
+
+        createAccountAndContact({ accountData: objAccount, contactData: objContact })
+            .then((response) => {
+                console.log('response'+response);
+                // Handle success here, show a toast message, navigate, etc.
+                console.log('Records created successfully.');
+                this.loadSpinner = false;
+                //alert('We received your request and will be reviewed by us.');
+                //this.showToastMessage('Success', 'Thank you for signing up. You will be notified regarding your approval request.', 'success');
+                // Refresh the page after 5 seconds
+                  /*setTimeout(() => {
+                      location.reload();
+                  }, 2000); */
+
+                // Clear field values on UI
+
+                //this.accountData.clear();
+                //this.contactData.clear();
+                //this.dataInserted =true;
+                //this.successMsg ='Thank you for signing up. You will be notified regarding your approval request.';
+                //this.variableFromApex='Duplicate contact found in a different account.';
+                if(response=='Duplicate contact found in a different account.'){
+                this.showToastMessage('Error', 'The contact is associated with a different account having different email id . Please check the entered details.', 'error');
+               
+                }else{
+                     this.showToastMessage('Success', 'Thank you for signing up. You will be notified regarding your approval request.', 'success');
+                     this.successMsg ='Thank you for signing up. You will be notified regarding your approval request.';
+                     this.accountData.clear();
+                this.contactData.clear();
+                this.dataInserted =true;
+                }
+
+            })
+            .catch((error) => {
+                // Handle error here, show an error message, log the error, etc.
+                console.error('Error creating records:', error);
+                this.loadSpinner = false;
+                //alert('Error creating records: ' + error.body.message);
+               // this.showToastMessage('Error', 'Error creating records: ' + error.body.message, 'error');
+               console.log('before if block::'+error.body.message);      
+                // Handle other errors
+                //this.showToastMessage('Error', 'Error creating records: ' + error.body.message, 'error');
+                this.showToastMessage('Error', 'An Contact/User With same Email already exists reach out to the admin or reset the password.','error');
+            });
+    }
+
+    handleCancel() {
+
+        // Refresh the page immediately
+        location.reload();
+
+    }
+    showToastMessage(title, message, variant) {
+        console.log('TOAST ' + title);
+
+        const event = new ShowToastEvent({
+            title: title,
+            message: message,
+            variant: variant,
+            mode:'dismissible'
+        });
+         console.log('event ' + event);
+        
+        this.dispatchEvent(event);
+    }
+    opentc() {
+        this.isOpen = true;
+    }
+
+    closetc() {
+        this.isOpen = false;        
+    }
+   
+    handleAgree() {
+        // Add your logic here for what happens when the "Agree" button is clicked
+        console.log('Agreed to terms');
+        this.agreeBtn=true;
+        this.isOpen = false;
+    }
+
+    handleToggleChange(event) {
+        // get the current value of the toggle
+        this.toggleValue = event.target.checked;
+        console.log(this.toggleValue);
+        
+    }
+
+    get saveBtnDisabled(){
+        // when toggle not checked and Agree button not clicked
+        return this.toggleValue && this.agreeBtn? false:true;
+    }
+    get agreeBtnDisabled(){
+        return !this.toggleValue;
+    }
+}
+-----------------------------CSS--------------------------------------------------------
+.dummy{
+	color : black;
+}
+
+    .section {
+        margin-bottom: 20px;
+        padding: 10px;
+        border: 1px solid #d3d3d3;
+        border-radius: 5px;
+        background-color: #f9f9f9;
+    }
+    
+    .section-title {
+        font-size: 18px;
+        margin-bottom: 10px;
+    }
+    
+    .buttons-section {
+        text-align: center;
+        margin-top: 20px;
+    }
+	
+.registration-card {
+        text-align: center;
+        background-color: #f2f2f2;
+        border: 1px solid #d3d3d3;
+        border-radius: 10px;
+        padding: 20px;
+        box-shadow: 0px 2px 4px rgba(0, 0, 0, 0.1);
+    }
+.cresultPanel {
+    top: 0 !important;
+    width: 100% !important;
+    position: fixed !important;
+    margin: 0;
+    max-width: 100%;
+}
+li {
+    margin-bottom: 10px; /* Adjust this value based on the desired space */
+    list-style-type: decimal;
+    margin-left: 20px;
+}
+.custom-button {
+    font-size: 18px; /* Adjust to desired font size */
+    margin-left: 20px;
+}
+-------------------------------------------------XML------------------------------------------------------
+<?xml version="1.0"?>
+<LightningComponentBundle xmlns="http://soap.sforce.com/2006/04/metadata">
+	<apiVersion>57.0</apiVersion>
+	<isExposed>true</isExposed>
+	<targets>
+		<target>lightning__RecordPage</target>
+		<target>lightning__HomePage</target>
+		<target>lightningCommunity__Page</target>
+		<target>lightningCommunity__Default</target>
+		<target>lightningCommunity__Page_Layout</target>
+		<target>lightningCommunity__Theme_Layout</target>
+	</targets>
+</LightningComponentBundle>
